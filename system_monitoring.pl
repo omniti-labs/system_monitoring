@@ -18,6 +18,7 @@ use POSIX qw( strftime setsid );
 use Getopt::Long;
 use File::Spec;
 use File::Path qw( mkpath );
+use MIME::Base64;
 use IO::Select;
 use IO::Handle;
 
@@ -28,6 +29,7 @@ sub new {
 
 sub run {
     my $self = shift;
+    $self->{ 'job_id' } = 1;
 
     $self->read_command_line_options();
 
@@ -161,7 +163,11 @@ sub print_log {
     my $self = shift;
     my $C    = shift;
 
-    my $line_prefix = strftime( '%Y-%m-%d %H:%M:%S %Z | ', localtime( $self->{ 'current_time' } ) );
+    my $timestamp = strftime( '%Y-%m-%d %H:%M:%S %Z', localtime( $self->{ 'current_time' } ) );
+    my $job_id = $C->{ 'job_id' };
+    $job_id = '??' unless defined $job_id;
+    my $line_prefix = sprintf( '%s%s%s%s', $timestamp, "\t", $job_id, "\t" );
+
     while ( $C->{ 'buffer' } =~ s{\A([^\n]*\n)}{} ) {
         my $line = $1;
         print { $C->{ 'fh' } } $line_prefix . $line;
@@ -201,6 +207,20 @@ sub run_check {
     open my $fh, $mode, $command or die "Cannot open [$command] in mode [$mode]: $OS_ERROR\n";
     $self->{ 'select' }->add( $fh );
     $C->{ 'input' } = $fh;
+
+    my $encoded_job_id = encode_base64( pack( 'N', $self->{ 'job_id' } ) );
+    $self->{ 'job_id' }++;
+
+    $encoded_job_id =~ s/\s+//g;    # new line characters and anything like
+                                    # this is irrelevant
+    $encoded_job_id =~ s/=*\z//;    # trailing = are irrelevant, it just fill
+                                    # space to 4 bytes
+    $encoded_job_id =~ s/\AA*//;    # leading A characters are like leasing 0s
+                                    # in numbers. And since we don't really
+                                    # care about full base64 (and its
+                                    # reversability), we can remove it
+
+    $C->{ 'job_id' } = $encoded_job_id;
 
     return;
 }
