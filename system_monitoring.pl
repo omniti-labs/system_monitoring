@@ -12,8 +12,10 @@ exit;
 package Monitoring;
 use strict;
 use warnings;
+use Carp;
 use English qw( -no_match_vars );
 use Time::HiRes qw( time sleep );
+use Time::Local qw( timelocal );
 use POSIX qw( strftime setsid );
 use Getopt::Long;
 use File::Spec;
@@ -37,6 +39,11 @@ sub run {
 
     $self->validate_config();
 
+    if ( $self->{ 'show_check' } ) {
+        $self->show_data();
+        return;
+    }
+
     $self->daemonize();
 
     $self->{ 'select' } = IO::Select->new();
@@ -44,6 +51,90 @@ sub run {
 
     $self->main_loop();
     return;
+}
+
+sub show_data {
+    my $self = shift;
+    croak( sprintf 'Requested check (%s) is not defined in config (%s)!', $self->{ 'show_check' }, $self->{ 'config_file' } ) unless $self->{ 'checks_hash' }->{ $self->{ 'show_check' } };
+
+    my @files = $self->find_best_files_for_show();
+
+    for my $use_file ( @files ) {
+
+        my $input;
+        if ( $use_file =~ m{\.gz\z} ) {
+            open $input, '-|', 'gzip --decompress --stdout ' . quotemeta( $use_file ) or croak( "Cannot gzip-decompress $use_file: $OS_ERROR" );
+        }
+        elsif ( $use_file =~ m{\.bz2\z} ) {
+            open $input, '-|', 'bzip2 --decompress --stdout ' . quotemeta( $use_file ) or croak( "Cannot bzip2-decompress $use_file: $OS_ERROR" );
+        }
+        else {
+            open $input, '<', $use_file or croak( "Cannot open $use_file: $OS_ERROR" );
+        }
+
+        my $C = $self->{ 'checks_hash' }->{ $self->{ 'show_check' } };
+
+        my $state           = 0;
+        my $last_time_str   = 0;
+        my $last_time_epoch = 0;
+        my $data_marker;
+
+        while ( <$input> ) {
+            croak( "Bad line in log: $_" ) unless m{^((\d\d\d\d)-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)) \S+\t(\S+)};
+            my ( $time_str, $line_code, @elements ) = ( $1, $8, $2, $3, $4, $5, $6, $7 );
+            next if $line_code =~ m{\A(?:\?\?|:h)\z}; # ignore ?? and :h
+            $elements[ 1 ]--;    # month should be 0-11, and not 1-12
+
+            my $time_epoch = $time_str eq $last_time_str ? $last_time_epoch : timelocal( reverse @elements );
+            $last_time_str   = $time_str;
+            $last_time_epoch = $time_epoch;
+
+            my $line_marker = $C->{ 'type' } eq 'periodic' ? $line_code : $time_str;
+
+            if ( $state == 0 ) {
+                next if $time_epoch < $self->{ 'show_time' };
+                $state = 1;
+                print;
+                $data_marker = $line_marker;
+                next;
+            }
+            else {
+                return unless $data_marker eq $line_marker;
+                print;
+            }
+        }
+        close $input;
+    }
+
+    return;
+}
+
+sub find_best_files_for_show {
+    my $self = shift;
+
+    my @use_files = ();
+
+    my $use_ts = $self->{ 'show_time' };
+
+    while ( $use_ts < time() ) {
+        my @t                = localtime( $use_ts );
+        my $directory_prefix = strftime( '%Y/%m/%d', @t );
+        my $full_directory   = File::Spec->catfile( $self->{ 'logdir' }, $directory_prefix );
+        my $file_suffix      = strftime( '-%Y-%m-%d-%H.log', @t );
+
+        my $file_name = $self->{ 'show_check' } . $file_suffix;
+        my $full_path = File::Spec->catfile( $full_directory, $file_name );
+
+        for my $ext ( ( '', '.gz', '.bz2' ) ) {
+            next unless -f $full_path . $ext;
+            push @use_files, $full_path . $ext;
+            return @use_files if 2 == scalar @use_files;
+            last;
+        }
+        $use_ts += 3600;
+    }
+    croak( "There is no data for this check and this time." ) if 0 == scalar @use_files;
+    return @use_files;
 }
 
 sub daemonize {
@@ -56,17 +147,17 @@ sub daemonize {
     $self->handle_pidfile();
 
     #<<<  do not let perltidy touch this
-    open( STDIN,  '<', '/dev/null' ) || die "can't read /dev/null: $!";
-    open( STDOUT, '>', '/dev/null' ) || die "can't write to /dev/null: $!";
-    defined( my $pid = fork() )      || die "can't fork: $!";
+    open( STDIN,  '<', '/dev/null' ) || croak( "can't read /dev/null: $!" );
+    open( STDOUT, '>', '/dev/null' ) || croak( "can't write to /dev/null: $!" );
+    defined( my $pid = fork() )      || croak( "can't fork: $!" );
     if ( $pid ) {
         # parent
         sleep 1; # time for slave to rewrite pidfile
         exit
     }
     $self->write_pidfile();
-    ( setsid() != -1 )               || die "Can't start a new session: $!";
-    open( STDERR, '>&', \*STDOUT )   || die "can't dup stdout: $!";
+    ( setsid() != -1 )               || croak( "Can't start a new session: $!" );
+    open( STDERR, '>&', \*STDOUT )   || croak( "can't dup stdout: $!" );
     #>>>
     return;
 }
@@ -83,7 +174,7 @@ sub write_pidfile {
     my $self = shift;
     return unless $self->{ 'pidfile' };
     my $pidfilename = $self->{ 'pidfile' };
-    open my $pidfile, '>', $pidfilename or die "Cannot write to pidfile ($pidfilename): $OS_ERROR\n";
+    open my $pidfile, '>', $pidfilename or croak( "Cannot write to pidfile ($pidfilename): $OS_ERROR\n" );
     print $pidfile $PID . "\n";
     close $pidfile;
     return;
@@ -94,15 +185,15 @@ sub verify_existing_pidfile {
     return unless $self->{ 'pidfile' };
     my $pidfilename = $self->{ 'pidfile' };
     return unless -e $pidfilename;
-    die "Pidfile ($pidfilename) exists, but is not a file?!\n" unless -f $pidfilename;
-    open my $pidfile, '<', $pidfilename or die "Cannot read from pidfile ($pidfilename): $OS_ERROR\n";
+    croak( "Pidfile ($pidfilename) exists, but is not a file?!\n" ) unless -f $pidfilename;
+    open my $pidfile, '<', $pidfilename or croak( "Cannot read from pidfile ($pidfilename): $OS_ERROR\n" );
     my $old_pid_line = <$pidfile>;
     close $pidfile;
 
-    die "Bad format of pidfile ($pidfilename)!\n" unless $old_pid_line =~ m{\A(\d+)\s*\z};
+    croak( "Bad format of pidfile ($pidfilename)!\n" ) unless $old_pid_line =~ m{\A(\d+)\s*\z};
     my $old_pid = $1;
     return if 0 == kill( 0, $old_pid );
-    die "Old process ($old_pid) still exists!\n";
+    croak( "Old process ($old_pid) still exists!\n" );
 }
 
 sub main_loop {
@@ -132,7 +223,7 @@ sub handle_read {
         $C = $tmp;
         last;
     }
-    die "Data from unknown input?! It shouldn't *ever* happen\n" unless $C;
+    croak( "Data from unknown input?! It shouldn't *ever* happen\n" ) unless $C;
 
     my $read_data = '';
     while ( 1 ) {
@@ -204,7 +295,7 @@ sub run_check {
     my $mode = '-|';
     $mode = '<' if $command =~ s/\A\s*<\s*//;
 
-    open my $fh, $mode, $command or die "Cannot open [$command] in mode [$mode]: $OS_ERROR\n";
+    open my $fh, $mode, $command or croak( "Cannot open [$command] in mode [$mode]: $OS_ERROR\n" );
     $self->{ 'select' }->add( $fh );
     $C->{ 'input' } = $fh;
 
@@ -290,7 +381,7 @@ sub update_logger_filehandles {
         }
 
         my $full_name = File::Spec->catfile( $full_directory, $C->{ 'name' } . $file_suffix );
-        open my $fh, '>>', $full_name or die "Cannot write to $full_name: $OS_ERROR\n";
+        open my $fh, '>>', $full_name or croak( "Cannot write to $full_name: $OS_ERROR\n" );
         $C->{ 'fh' } = $fh;
 
         if (   ( $C->{ 'header' } )
@@ -298,9 +389,13 @@ sub update_logger_filehandles {
         {
 
             # File is empty
-            $C->{ 'buffer' } .= "\n" if $C->{ 'buffer' };
-            $C->{ 'buffer' } .= $C->{ 'header' };
+            my $tmp_job_id = $C->{ 'job_id' };
+            $C->{ 'job_id' } = ':h';
+            my $tmp_buffer = $C->{ 'buffer' };
+            $C->{ 'buffer' } = $C->{ 'header' };
             $self->print_log( $C );
+            $C->{ 'job_id' } = $tmp_job_id;
+            $C->{ 'buffer' } = $tmp_buffer;
         }
     }
 
@@ -315,21 +410,21 @@ sub checks {
 sub validate_config {
     my $self = shift;
 
-    die "GLOBAL.logdir was not provided in config!\n" unless defined $self->{ 'logdir' };
-    die "There are no checks to be run!\n"            unless defined $self->{ 'pre_checks' };
+    croak( "GLOBAL.logdir was not provided in config!\n" ) unless defined $self->{ 'logdir' };
+    croak( "There are no checks to be run!\n" )            unless defined $self->{ 'pre_checks' };
 
-    die "Cannot chdir to " . $self->{ 'logdir' } . ": $OS_ERROR\n" unless chdir $self->{ 'logdir' };
+    croak( "Cannot chdir to " . $self->{ 'logdir' } . ": $OS_ERROR\n" ) unless chdir $self->{ 'logdir' };
 
     my @checks = ();
     while ( my ( $check, $C ) = each %{ $self->{ 'pre_checks' } } ) {
         $C->{ 'name' } = $check;
         push @checks, $C;
 
-        die "Bad type " . $C->{ 'type' } . " in check $check!\n" unless $C->{ 'type' } =~ m{\A(?:persistent|periodic)\z};
+        croak( "Bad type " . $C->{ 'type' } . " in check $check!\n" ) unless $C->{ 'type' } =~ m{\A(?:persistent|periodic)\z};
         next unless $C->{ 'type' } eq 'periodic';
 
-        die "Undefined interval for check $check!\n" unless defined $C->{ 'interval' };
-        die "Bad interval (" . $C->{ 'interval' } . ") in check $check!\n" unless $C->{ 'interval' } =~ m{\A[1-9]\d*\z};
+        croak( "Undefined interval for check $check!\n" ) unless defined $C->{ 'interval' };
+        croak( "Bad interval (" . $C->{ 'interval' } . ") in check $check!\n" ) unless $C->{ 'interval' } =~ m{\A[1-9]\d*\z};
 
         $self->process_config_vars( $C );
 
@@ -351,6 +446,7 @@ sub validate_config {
     }
 
     $self->{ 'checks' } = \@checks;
+    $self->{ 'checks_hash' } = { map { ( $_->{ 'name' } => $_ ) } @checks };
     delete $self->{ 'pre_checks' };
 
     return;
@@ -374,7 +470,7 @@ sub read_config {
 
     my $config_file_name = $self->{ 'config_file' };
 
-    open my $fh, '<', $config_file_name or die "Cannot open config file ($config_file_name) : $OS_ERROR\n";
+    open my $fh, '<', $config_file_name or croak( "Cannot open config file ($config_file_name) : $OS_ERROR\n" );
     while ( my $line = <$fh> ) {
         next if $line =~ m{^\s*#};     # comment
         next if $line =~ m{^\s*\z};    # empty line
@@ -400,7 +496,7 @@ sub read_config {
             $self->{ 'pre_checks' }->{ $1 }->{ 'env' }->{ $2 } = $3;
             next;
         }
-        die "Unknown line: [ $line ]\n";
+        croak( "Unknown line: [ $line ]\n" );
     }
     close $fh;
     return unless $self->{ 'var' };
@@ -414,11 +510,28 @@ sub read_config {
 sub read_command_line_options {
     my $self = shift;
 
-    my $daemonize = undef;
-    exit( 1 ) unless GetOptions( 'daemonize|d' => \$daemonize );
-    $self->{ 'daemonize' } = $daemonize;
+    my $daemonize  = undef;
+    my $show_check = undef;
+    my $show_time  = undef;
+    exit( 1 ) unless GetOptions(
+        'daemonize|d' => \$daemonize,
+        'show|s=s'    => \$show_check,
+        'time|t=s'    => \$show_time,
+    );
 
-    die "You have to provide name of config file! Check: perldoc $PROGRAM_NAME\n" if 0 == scalar @ARGV;
+    if ( $show_time ) {
+        croak( "-t value has bad format (not YYYY-MM-DD HH:MI:SS)\n" ) unless $show_time =~ m{\A(\d\d\d\d)-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)\z};
+        my @elements = ( $1, $2, $3, $4, $5, $6 );
+        $elements[ 1 ]--;    # month is 0-11, and not 1-12!
+        $show_time = timelocal( reverse @elements );
+    }
+    croak( "You cannot give -s without -t\n" ) if defined $show_check && !defined $show_time;
+    croak( "You cannot give -t without -s\n" ) if defined $show_time  && !defined $show_check;
+    $self->{ 'daemonize' }  = $daemonize;
+    $self->{ 'show_check' } = $show_check;
+    $self->{ 'show_time' }  = $show_time;
+
+    croak( "You have to provide name of config file! Check: perldoc $PROGRAM_NAME\n" ) if 0 == scalar @ARGV;
     $self->{ 'config_file' } = shift @ARGV;
 
     return;
@@ -430,7 +543,9 @@ sub read_command_line_options {
 
 =head2 USAGE
 
-system_monitoring.pl [-d] <config_file>
+  system_monitoring.pl [-d] <config_file>
+
+  system_monitoring.pl -s check -t when <config_file>
 
 =head2 DESCRIPTION
 
@@ -447,6 +562,19 @@ errors - will start processing checks.
 
 All checks work in parallel, so there is no chance single check could lock
 whole system_monitoring.pl.
+
+When run with -d option, it will daemonize itself and detach from terminal.
+
+When run with -s .. -t ... options, it will print values for given (-s)
+check for date being given (-t) or closest later.
+
+-t value (time to search for) has to be given in format:
+
+  YYYY-MM-DD HH:MI:SS
+
+For example:
+
+  2012-01-23 16:34:56
 
 =head2 Configuration file
 
