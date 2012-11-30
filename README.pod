@@ -1,0 +1,131 @@
+=head1 NAME
+
+system_monitoring.pl - job scheduler with single-second precision
+
+=head1 SYNOPSIS
+
+    system_monitoring.pl -d some_config.ini
+
+=head1 DESCRIPTION
+
+This tool is not strictly for PostgreSQL, but I use it on virtually any Pg server I have to look after, and I found it very useful.
+
+You most likely all know tools like Cacti, Ganglia, Munin and so on.
+
+system.monitoring is similar in the way that it gets data from system. But it's totally different in a way that it doesn't make any graphs. It just stores the data.
+
+But, addition of new data to be stored is trivial.
+
+Most generally system_monitoring.pl is simply job scheduler - like cron. But, unlike cron, it is not limited to 1 minute as the shortest interval. It can easily run jobs every second. Or run jobs that never end.
+
+It will run every command you give it to run, and log its output. That's all. But since it's small, and the logged format is normal plain text, it became extremely useful for me.
+
+Let's take a look at L<sample config|https://github.com/omniti-labs/system_monitoring/blob/master/config-sample.cfg>.
+
+At the beginning I set some variables - most importantly - where the logs will go.
+
+Then I set environment variables that will be used for all "checks" (it can be overridden for every check). And then I set some additional variables which make running checks a bit nicer.
+
+Then, I have the actual checks.
+
+There are three kinds of them: persistent (command), periodic command, and periodic file.
+
+persistent check example looks like this:
+
+    check.iostat.type=persistent
+    check.iostat.exec=iostat -kx 5
+
+On start, system_monitoring.pl will run iostat -kx 5, and then will log everything it will output, when it will output, to the iostat logfile.
+
+Periodic check can looks like this:
+
+    check.ps.type=periodic
+    check.ps.exec=ps axo user,pid,ppid,pgrp,%cpu,%mem,rss,lstart,nice,nlwp,sgi_p,cputime,tty,wchan:25,args
+    check.ps.interval=30
+
+This will run, every 30 seconds, this ps command, and log output.
+
+If first character of exec for check is "&lt;" the rest of exec line is assumed to be file that should be opened (to read), and it's content be copied to log for given check. Hence:
+
+    check.mem.type=periodic
+    check.mem.exec=< /proc/meminfo
+    check.mem.interval=10
+
+Will log meminfo every 10 seconds to logs.
+
+Logs are stored in tree structure which is based on when even happened. Exact filename for check is F<LOGDIR/YYYY/MM/DD/CHECK_NAME-HOUR.log>. With default logdir, current meminfo log is: F</var/log/system_monitoring/2012/01/22/mem-2012-01-22-16.log>
+
+It looks like this:
+
+    2012-01-22 16:00:02 UTC BSGMA   MemTotal:     528655576 kB
+    2012-01-22 16:00:02 UTC BSGMA   MemFree:      14354712 kB
+    2012-01-22 16:00:02 UTC BSGMA   Buffers:       1099748 kB
+    2012-01-22 16:00:02 UTC BSGMA   Cached:       465002160 kB
+    2012-01-22 16:00:02 UTC BSGMA   SwapCached:       5304 kB
+    2012-01-22 16:00:02 UTC BSGMA   Active:       426886732 kB
+    2012-01-22 16:00:02 UTC BSGMA   Inactive:     55076184 kB
+    2012-01-22 16:00:02 UTC BSGMA   HighTotal:           0 kB
+    2012-01-22 16:00:02 UTC BSGMA   HighFree:            0 kB
+    2012-01-22 16:00:02 UTC BSGMA   LowTotal:     528655576 kB
+    2012-01-22 16:00:02 UTC BSGMA   LowFree:      14354712 kB
+    2012-01-22 16:00:02 UTC BSGMA   SwapTotal:     2048276 kB
+    2012-01-22 16:00:02 UTC BSGMA   SwapFree:      1902552 kB
+    2012-01-22 16:00:02 UTC BSGMA   Dirty:            5776 kB
+    2012-01-22 16:00:02 UTC BSGMA   Writeback:         236 kB
+    2012-01-22 16:00:02 UTC BSGMA   AnonPages:    15869780 kB
+    2012-01-22 16:00:02 UTC BSGMA   Mapped:       107046492 kB
+    2012-01-22 16:00:02 UTC BSGMA   Slab:         10872504 kB
+    2012-01-22 16:00:02 UTC BSGMA   PageTables:   20694796 kB
+    2012-01-22 16:00:02 UTC BSGMA   NFS_Unstable:        0 kB
+    2012-01-22 16:00:02 UTC BSGMA   Bounce:              0 kB
+    2012-01-22 16:00:02 UTC BSGMA   CommitLimit:  266376064 kB
+    2012-01-22 16:00:02 UTC BSGMA   Committed_AS: 158592164 kB
+    2012-01-22 16:00:02 UTC BSGMA   VmallocTotal: 34359738367 kB
+    2012-01-22 16:00:02 UTC BSGMA   VmallocUsed:    271152 kB
+    2012-01-22 16:00:02 UTC BSGMA   VmallocChunk: 34359466935 kB
+    2012-01-22 16:00:02 UTC BSGMA   HugePages_Total:     0
+    2012-01-22 16:00:02 UTC BSGMA   HugePages_Free:      0
+    2012-01-22 16:00:02 UTC BSGMA   HugePages_Rsvd:      0
+    2012-01-22 16:00:02 UTC BSGMA   Hugepagesize:     2048 kB
+    2012-01-22 16:00:12 UTC BSGPA   MemTotal:     528655576 kB
+
+And so on.
+
+As you can see nothing really complicated.
+
+There are 2 more features. One of them are checks that are configured so that their output is ignored and not logged - this is for cleanup jobs - check last three in example config.
+
+The other feature are headers.
+
+For example, let's look at pg_stat_database check. The way it's written, it logs data like:
+
+    $ tail pg_stat_database-2012-01-22-15.log
+    2012-01-22 15:59:06 UTC BSF9w   template1       10      6       t       t       -1      11510   15545653        1663    \N      {=c/postgres,postgres=CTc/postgres}     4689516
+    2012-01-22 15:59:06 UTC BSF9w   postgres        10      6       f       t       -1      11510   15253018        1663    \N      \N      42800983660
+    2012-01-22 15:59:06 UTC BSF9w   pg_audit        10      6       f       t       -1      11510   15252690        1663    \N      \N      4779628
+    2012-01-22 15:59:06 UTC BSF9w   template0       10      6       t       f       -1      11510   3886088170      1663    \N      {=c/postgres,postgres=CTc/postgres}     4583020
+    2012-01-22 15:59:06 UTC BSF9w   magicdb 10      6       f       t       -1      11510   3922373574      1663    {"search_path=public, check_postgres, ltree, pgcrypto"} \N      716819345004
+    2012-01-22 15:59:37 UTC BSGFA   template1       10      6       t       t       -1      11510   15545653        1663    \N      {=c/postgres,postgres=CTc/postgres}     4689516
+    2012-01-22 15:59:37 UTC BSGFA   postgres        10      6       f       t       -1      11510   15253018        1663    \N      \N      42800983660
+    2012-01-22 15:59:37 UTC BSGFA   pg_audit        10      6       f       t       -1      11510   15252690        1663    \N      \N      4779628
+    2012-01-22 15:59:37 UTC BSGFA   template0       10      6       t       f       -1      11510   3886088170      1663    \N      {=c/postgres,postgres=CTc/postgres}     4583020
+    2012-01-22 15:59:37 UTC BSGFA   magicdb 10      6       f       t       -1      11510   3922373574      1663    {"search_path=public, check_postgres, ltree, pgcrypto"} \N      716820033132
+
+which is nice, but it would be cool to be able to know what which columns mean.
+
+So we have I<check.pg_stat_database.header> line, which makes system_montoring, to log, whenever it rotates logfile (i.e. every hour) to first log header:
+
+    $ head -n 1 pg_stat_database-2012-01-22-15.log
+    2012-01-22 15:00:01 UTC :h   datname datdba  encoding        datistemplate   datallowconn    datconnlimit    datlastsysoid   datfrozenxid    dattablespace   datconfig       datacl  size
+
+And that's about it. The one additional feature is that you can run system_monitoring and request it to show you data for given check for given time (or closest possible time after):
+
+    $ ./system_monitoring.pl -s loadavg -t '2012-01-22 18:04:00' config-sample.cfg
+    2012-01-22 18:04:00 CET Kg      0.01 0.10 0.12 1/575 20320
+
+And that's all. But thanks to its simplicity it's trivial to use the data it logs for some graphing tool, or just read it.
+
+=head1 COPYRIGHT
+
+The system_monitoring project is Copyright (c) 2012 OmniTI. All rights reserved.
+
