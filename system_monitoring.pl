@@ -82,8 +82,8 @@ sub show_data {
         while ( <$input> ) {
             croak( "Bad line in log: $_" ) unless m{^((\d\d\d\d)-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)) \S+\t(\S+)};
             my ( $time_str, $line_code, @elements ) = ( $1, $8, $2, $3, $4, $5, $6, $7 );
-            next if $line_code =~ m{\A(?:\?\?|:h)\z}; # ignore ?? and :h
-            $elements[ 1 ]--;    # month should be 0-11, and not 1-12
+            next if $line_code =~ m{\A(?:\?\?|:h)\z};    # ignore ?? and :h
+            $elements[ 1 ]--;                            # month should be 0-11, and not 1-12
 
             my $time_epoch = $time_str eq $last_time_str ? $last_time_epoch : timelocal( reverse @elements );
             $last_time_str   = $time_str;
@@ -235,12 +235,23 @@ sub handle_read {
     $C->{ 'buffer' } .= $read_data unless $C->{ 'ignore' };
 
     if ( '' eq $read_data ) {
+        if ( $C->{ 'logduration' } ) {
+            $C->{ 'end_time' } = time();
+        }
         $self->{ 'select' }->remove( $fh );
         close $fh;
         delete $C->{ 'input' };
         return unless 'periodic' eq $C->{ 'type' };
-        $C->{ 'next_call' } = $self->{ 'current_time' } + $C->{ 'interval' } if $self->{ 'current_time' } < $C->{ 'next_call' };
+
+        if ( $C->{ 'next_call' } - $self->{ 'current_time' } < $C->{ 'minwait' } ) {
+            $C->{ 'next_call' } = $self->{ 'current_time' } + $C->{ 'minwait' };
+        }
+
+        # $C->{ 'next_call' } = $self->{ 'current_time' } + $C->{ 'interval' } if $self->{ 'current_time' } < $C->{ 'next_call' };
         $C->{ 'buffer' } .= "\n" if ( defined $C->{ 'buffer' } ) && ( $C->{ 'buffer' } =~ /[^\n]\z/ );
+        if ( $C->{ 'logduration' } ) {
+            $C->{ 'buffer' } .= sprintf 'Time to finish: %.3fs%s', $C->{ 'end_time' } - $C->{ 'start_time' }, "\n";
+        }
         $self->print_log( $C ) unless $C->{ 'ignore' };
         return;
     }
@@ -295,6 +306,10 @@ sub run_check {
     my $mode = '-|';
     $mode = '<' if $command =~ s/\A\s*<\s*//;
 
+    if ( $C->{ 'logduration' } ) {
+        $C->{ 'start_time' } = time();
+    }
+
     open my $fh, $mode, $command or croak( "Cannot open [$command] in mode [$mode]: $OS_ERROR\n" );
     $self->{ 'select' }->add( $fh );
     $C->{ 'input' } = $fh;
@@ -322,8 +337,8 @@ sub start_periodic_processes {
         next unless 'periodic' eq $C->{ 'type' };
         next if defined $C->{ 'input' };
         next if ( defined $C->{ 'next_call' } ) && ( $C->{ 'next_call' } > $self->{ 'current_time' } );
-        $self->run_check( $C );
         $C->{ 'next_call' } = $self->{ 'current_time' } + $C->{ 'interval' };
+        $self->run_check( $C );
     }
     return;
 }
@@ -425,6 +440,8 @@ sub validate_config {
 
         croak( "Undefined interval for check $check!\n" ) unless defined $C->{ 'interval' };
         croak( "Bad interval (" . $C->{ 'interval' } . ") in check $check!\n" ) unless $C->{ 'interval' } =~ m{\A[1-9]\d*\z};
+        $C->{ 'minwait' } = 0 unless defined $C->{ 'minwait' };
+        croak( "Bad minwait (" . $C->{ 'minwait' } . ") in check $check!\n" ) unless $C->{ 'minwait' } =~ m{\A\d+\z};
 
         $self->process_config_vars( $C );
 
@@ -488,7 +505,7 @@ sub read_config {
             $self->{ 'var' }->{ $1 } = $2;
             next;
         }
-        elsif ( $line =~ m{ \A check\.([A-Za-z0-9_]+)\.(type|exec|interval|header|ignore) \s* = \s* (\S.*) \z }xmsi ) {
+        elsif ( $line =~ m{ \A check\.([A-Za-z0-9_]+)\.(type|exec|interval|minwait|header|logduration|ignore) \s* = \s* (\S.*) \z }xmsi ) {
             $self->{ 'pre_checks' }->{ $1 }->{ $2 } = $3;
             next;
         }
@@ -606,20 +623,31 @@ Recognized parameters are:
 
 =item * GLOBAL.logdir - full path to log directory
 
-=item * GLOBAL.pidfile- full path to file which should contain pid of currently running system_monitoring.pl
+=item * GLOBAL.pidfile- full path to file which should contain pid of
+currently running system_monitoring.pl
 
 =item * GLOBAL.env.* - setting environment variables
 
-=item * GLOBAL.var.* - setting variable to be used as expansion in header and exec lines. For example: GLOBAL.var.psql=/long/path/psql lets you later use check.XXX.exec=@psql. Variable names are limited to /^[A-Za-z0-9_]$/
+=item * GLOBAL.var.* - setting variable to be used as expansion in header
+and exec lines. For example: GLOBAL.var.psql=/long/path/psql lets you later
+use check.XXX.exec=@psql. Variable names are limited to /^[A-Za-z0-9_]$/
 
 =item * check.XXX.type - type of check with name XXX
 
 =item * check.XXX.exec - what should be executed to get data for check XXX
 
-=item * check.XXX.header - whenever first write to new file for given check is done, it should be printed first. If header value starts with ! it is treated (sans the ! character) as command to run
-that will output header. It has to be noted, though, that it's locking call - but it's only evaluated once - at the startup of monitoring script (this is intentional to 
+=item * check.XXX.header - whenever first write to new file for given check
+is done, it should be printed first. If header value starts with ! it is
+treated (sans the ! character) as command to run that will output header. It
+has to be noted, though, that it's locking call - but it's only evaluated
+once - at the startup of monitoring script (this is intentional to 
 
 =item * check.XXX.interval - how often to run check XXX
+
+=item * check.XXX.minwait - minimal wait for next run of the check
+
+=item * check.XXX.logduration - if set to true value, system_monitoring will
+log how long it took for the command to finish
 
 =item * check.XXX.ignore - should output be ignored?
 
@@ -668,6 +696,10 @@ afterwards. If you'd like to have something like 'tail -f' - use tail -f.
 
 interval is time (in seconds) how often given program (of periodic type)
 should be run.
+
+If job takes 25 seconds, and it scheduled to be run every 30 seconds, it
+will pause 5 seconds between end of previous iteration and starting new one,
+unless minwait parameter will be set to some higher value.
 
 ignore is optional parameter which is checked using Perl boolean logic (any
 value other than empty string or 0 ar treated as true). Since
